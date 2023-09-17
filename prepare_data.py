@@ -1,9 +1,13 @@
 import argparse
+import shlex
+import subprocess
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import requests
 import sentencepiece as spm
+import torch
 
 from modelling.encodec import EnCodec
 
@@ -47,14 +51,37 @@ def get_librispeech_meta(data_dir: str, split: str) -> pd.DataFrame:
     return pd.DataFrame(dict(filename=filenames, text=texts, speaker_id=speaker_ids, chapter_id=chapter_ids))
 
 
+def load_audio(path: str, sample_rate: int) -> torch.Tensor:
+    cmd = f"ffmpeg -i {path} -ar {sample_rate} -ac 1 -f s32le -"
+    proc = subprocess.run(shlex.split(cmd), capture_output=True)
+
+    if proc.returncode:
+        raise RuntimeError(proc.stderr.decode())
+    return torch.frombuffer(proc.stdout, dtype=torch.int32) / 2_147_483_648
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--t5_model", required=True)
     parser.add_argument("--encodec_model", required=True)
     parser.add_argument("--n_quantizers", type=int, default=4)
-    parser.add_argument("--data_dir", required=True)
+    parser.add_argument("--data_dir", type=Path, required=True)
+    parser.add_argument("--split", required=True)
 
     args = parser.parse_args()
 
     tokenizer = get_t5_tokenizer(args.t5_model)
-    encodec = EnCodec.from_facebook(args.encodec_model, pretrained=True)
+    encodec = EnCodec.from_facebook(args.encodec_model, pretrained=True, decoder=False).eval()
+
+    meta = get_librispeech_meta(args.data_dir, args.split)
+    for filename, text in zip(meta["filename"], meta["text"]):
+        audio = load_audio(args.data_dir / args.split / filename, 24_000)
+        audio_ids, scale = encodec.encode(audio.view(1, 1, -1), args.n_quantizers)
+
+        text_ids = tokenizer.Encode(text, add_eos=True)
+
+        print(audio_ids)
+        print(audio_ids.shape)
+        print(text_ids)
+        print(len(text_ids))
+        break
