@@ -1,4 +1,5 @@
 import argparse
+import os
 import shlex
 import subprocess
 from pathlib import Path
@@ -8,8 +9,12 @@ import pandas as pd
 import requests
 import sentencepiece as spm
 import torch
+from tqdm import tqdm
 
 from modelling.encodec import EnCodec
+
+
+FFMPEG_PATH = os.environ.get("FFMPEG_PATH", "ffmpeg")
 
 
 def get_t5_tokenizer(checkpoint: str, cache: str = "tokenizers") -> spm.SentencePieceProcessor:
@@ -52,12 +57,30 @@ def get_librispeech_meta(data_dir: str, split: str) -> pd.DataFrame:
 
 
 def load_audio(path: str, sample_rate: int) -> torch.Tensor:
-    cmd = f"ffmpeg -i {path} -ar {sample_rate} -ac 1 -f s32le -"
+    cmd = f"{FFMPEG_PATH} -i {path} -ar {sample_rate} -ac 1 -f s32le -"
     proc = subprocess.run(shlex.split(cmd), capture_output=True)
 
     if proc.returncode:
         raise RuntimeError(proc.stderr.decode())
     return torch.frombuffer(proc.stdout, dtype=torch.int32) / 2_147_483_648
+
+
+class SerializedDataWriter:
+    def __init__(self, name: str) -> None:
+        self.index = open(f"{name}.index", "wb")
+        self.data = open(f"{name}.data", "wb")
+        self.pos = np.array(0, dtype=np.int64)
+
+        self.index.write(self.pos.tobytes())
+
+    def write(self, item: np.ndarray) -> None:
+        self.data.write(item.tobytes())
+        self.pos += item.size
+        self.index.write(self.pos.tobytes())
+
+    def close(self) -> None:
+        self.index.close()
+        self.data.close()
 
 
 if __name__ == "__main__":
@@ -70,18 +93,27 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    tokenizer = get_t5_tokenizer(args.t5_model)
     encodec = EnCodec.from_facebook(args.encodec_model, pretrained=True, decoder=False).eval()
 
     meta = get_librispeech_meta(args.data_dir, args.split)
-    for filename, text in zip(meta["filename"], meta["text"]):
+
+    tokenizer = get_t5_tokenizer(args.t5_model)
+    all_text_ids = tokenizer.Encode(meta["text"].to_list(), add_eos=True)
+
+    text_writer = SerializedDataWriter("text")
+    for text_ids in all_text_ids:
+        text_ids = np.array(text_ids, dtype=np.int16)  # vocab size is 32,000
+        text_writer.write(text_ids)
+    text_writer.close()
+
+    audio_writer = SerializedDataWriter("audio")
+
+    for filename in tqdm(meta["filename"]):
         audio = load_audio(args.data_dir / args.split / filename, 24_000)
         audio_ids, scale = encodec.encode(audio.view(1, 1, -1), args.n_quantizers)
+        audio_ids = audio_ids.squeeze()  # (n_quantizers, length)
 
-        text_ids = tokenizer.Encode(text, add_eos=True)
+        audio_ids = audio_ids.cpu().to(torch.int16).numpy()  # codebook size is 1024
+        audio_writer.write(audio_ids)
 
-        print(audio_ids)
-        print(audio_ids.shape)
-        print(text_ids)
-        print(len(text_ids))
-        break
+    audio_writer.close()
