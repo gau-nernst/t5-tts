@@ -186,14 +186,27 @@ class RVQ(nn.ModuleList):
 
 
 class EnCodec(nn.Module):
-    def __init__(self, audio_channels: int, norm_type: str, causal: bool, n_quantizers: int, normalize: bool) -> None:
+    def __init__(
+        self,
+        audio_channels: int,
+        norm_type: str,
+        causal: bool,
+        n_quantizers: int,
+        normalize: bool,
+        encoder: bool = True,
+        decoder: bool = True,
+    ) -> None:
+        assert encoder or decoder
         super().__init__()
-        self.encoder = EnCodecEncoder(audio_channels, norm_type=norm_type, causal=causal)
-        self.decoder = EnCodecDecoder(audio_channels, norm_type=norm_type, causal=causal)
+        self.encoder = EnCodecEncoder(audio_channels, norm_type=norm_type, causal=causal) if encoder else None
+        self.decoder = EnCodecDecoder(audio_channels, norm_type=norm_type, causal=causal) if decoder else None
         self.quantizer = RVQ(128, 1024, n_quantizers)
         self.normalize = normalize
 
+    @torch.no_grad()
     def encode(self, x: Tensor, n_quantizers: int | None = None) -> tuple[Tensor, Tensor | None]:
+        assert self.encoder is not None
+
         if self.normalize:
             scale = x.mean(1, keepdim=True).square().mean(2, keepdim=True).sqrt() + 1e-8
             x = x / scale
@@ -204,7 +217,10 @@ class EnCodec(nn.Module):
         x = self.quantizer.quantize(x.transpose(1, 2), n_quantizers).transpose(0, 1)
         return x, scale
 
+    @torch.no_grad()
     def decode(self, x: Tensor, scale: Tensor | None = None) -> Tensor:
+        assert self.decoder is not None
+
         x = self.quantizer.dequantize(x.transpose(0, 1)).transpose(1, 2)
         x = self.decoder(x)
 
@@ -213,12 +229,12 @@ class EnCodec(nn.Module):
         return x
 
     @staticmethod
-    def from_facebook(variant: str, pretrained: bool = False) -> "EnCodec":
+    def from_facebook(variant: str, pretrained: bool = False, encoder: bool = True, decoder: bool = True) -> "EnCodec":
         audio_channels, norm_type, causal, n_quantizers, normalize = {
             "24khz": (1, "weight_norm", True, 32, False),
             "48khz": (2, "time_group_norm", False, 16, True),
         }[variant]
-        m = EnCodec(audio_channels, norm_type, causal, n_quantizers, normalize)
+        m = EnCodec(audio_channels, norm_type, causal, n_quantizers, normalize, encoder, decoder)
 
         if pretrained:
             ckpt = {
@@ -227,6 +243,15 @@ class EnCodec(nn.Module):
             }[variant]
             base_url = "https://dl.fbaipublicfiles.com/encodec/v0/"
             state_dict = torch.hub.load_state_dict_from_url(base_url + ckpt)
+
+            keys_to_pop = []
+            if not encoder:
+                keys_to_pop.extend(k for k in state_dict.keys() if k.startswith("encoder"))
+            if not decoder:
+                keys_to_pop.extend(k for k in state_dict.keys() if k.startswith("decoder"))
+            for k in keys_to_pop:
+                state_dict.pop(k)
+
             m.load_facebook_state_dict(state_dict)
 
         return m
