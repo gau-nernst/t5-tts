@@ -29,20 +29,22 @@ def get_librispeech_meta(data_dir: str, split: str) -> pd.DataFrame:
 
     filenames = []
     texts = []
+    speaker_ids = []
+    chapter_ids = []
 
     for speaker_id in sub_dir.iterdir():
         for chapter_id in speaker_id.iterdir():
             transcript = f"{speaker_id.name}-{chapter_id.name}.trans.txt"
 
-            for line in open(chapter_id / transcript):
-                filename, text = line.rstrip().split(maxsplit=1)
+            lines = [line.rstrip() for line in open(chapter_id / transcript)]
+            speaker_ids.extend([speaker_id.name] * len(lines))
+            chapter_ids.extend([chapter_id.name] * len(lines))
+            for line in lines:
+                filename, text = line.split(maxsplit=1)
                 filenames.append(f"{speaker_id.name}/{chapter_id.name}/{filename}.flac")
                 texts.append(text.lower())
 
-    meta = pd.DataFrame(dict(filename=filenames, text=texts))
-    meta["speaker_id"] = meta["filename"].str.split("/").str[0]
-    meta["chapter_id"] = meta["filename"].str.split("/").str[1]
-    return meta
+    return pd.DataFrame(dict(filename=filenames, text=texts, speaker_id=speaker_ids, chapter_id=chapter_ids))
 
 
 if __name__ == "__main__":
