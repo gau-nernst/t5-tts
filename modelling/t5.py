@@ -22,6 +22,18 @@ class LayerNorm(nn.Module):
         return _x.to(x.dtype) * self.weight.to(x.dtype)
 
 
+# https://arxiv.org/pdf/2002.05202.pdf
+class GEGLU(nn.Module):
+    def __init__(self, dim: int, mlp_dim: int) -> None:
+        super().__init__()
+        self.w = nn.Linear(dim, mlp_dim, False)
+        self.v = nn.Linear(dim, mlp_dim, False)
+        self.act = nn.GELU()
+
+    def forward(self, x: Tensor) -> Tensor:
+        return self.act(self.w(x)) * self.v(x)
+
+
 class Attention(nn.Module):
     def __init__(self, dim: int, n_heads: int, head_dim: int = 64, dropout: float = 0.0) -> None:
         super().__init__()
@@ -43,26 +55,10 @@ class Attention(nn.Module):
         k = self.k_proj(k).unflatten(-1, (self.n_heads, self.head_dim)).transpose(-2, -3)
         v = self.v_proj(v).unflatten(-1, (self.n_heads, self.head_dim)).transpose(-2, -3)
 
-        # TODO: merge this into q and k weights
-        q = q * self.head_dim**0.25
-        k = k * self.head_dim**0.25
-
         dropout = self.dropout if self.training else 0.0
         out = F.scaled_dot_product_attention(q, k, v, attn_bias, dropout)
         out = self.out_proj(out.transpose(-2, -3).flatten(-2))
         return F.dropout(out, self.dropout, self.training)
-
-
-# https://arxiv.org/pdf/2002.05202.pdf
-class GEGLU(nn.Module):
-    def __init__(self, dim: int, mlp_dim: int) -> None:
-        super().__init__()
-        self.w = nn.Linear(dim, mlp_dim, False)
-        self.v = nn.Linear(dim, mlp_dim, False)
-        self.act = nn.GELU()
-
-    def forward(self, x: Tensor) -> Tensor:
-        return self.act(self.w(x)) * self.v(x)
 
 
 class RelativePositionBias(nn.Module):
@@ -196,10 +192,37 @@ class T5Model(nn.Module):
         if checkpoint is not None:
             location = get_checkpoint_location(checkpoint, size)
             ckpt = load_t5x_checkpoint(location)
-            ckpt = {_rename_key(k): v.T if k.endswith("kernel") else v for k, v in ckpt.items()}
-            m.load_state_dict(ckpt)
+
+            state_dict = {}
+            for k, v in ckpt.items():
+                if k.endswith("kernel"):
+                    v = v.T
+                if k.endswith(("query.kernel", "key.kernel")):
+                    v *= 64**0.25
+                state_dict[_rename_key(k)] = v
+
+            m.load_state_dict(state_dict)
 
         return m
+
+    @staticmethod
+    def get_tokenizer(checkpoint: str, cache: str = "tokenizers"):
+        import requests
+        import sentencepiece as spm
+
+        location = "mc4.250000.100extra" if checkpoint.startswith("mt5") else "cc_all.32000.100extra"
+
+        cache_path = Path(cache) / location
+        if not cache_path.exists():
+            BASE_URL = "https://storage.googleapis.com/t5-data/vocabs"
+            cache_path.mkdir(parents=True)
+
+            for filename in ("sentencepiece.model", "sentencepiece.vocab"):
+                resp = requests.get(f"{BASE_URL}/{location}/{filename}")
+                with open(cache_path / filename, "wb") as f:
+                    f.write(resp.content)
+
+        return spm.SentencePieceProcessor(str(cache_path / "sentencepiece.model"))
 
 
 def _rename_key(key: str) -> str:
@@ -246,7 +269,6 @@ def load_t5x_checkpoint(location: str, n_threads: int = 16, cache: str = "checkp
     from requests.adapters import HTTPAdapter
 
     BASE_URL = "https://storage.googleapis.com/t5-data/pretrained_models/t5x/"
-
     session = requests.Session()
     session.mount(BASE_URL, HTTPAdapter(pool_maxsize=n_threads))
     pool = ThreadPoolExecutor(n_threads)
