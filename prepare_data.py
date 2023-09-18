@@ -6,31 +6,14 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import requests
-import sentencepiece as spm
 import torch
 from tqdm import tqdm
 
 from modelling.encodec import EnCodec
+from modelling.t5 import T5Model
 
 
 FFMPEG_PATH = os.environ.get("FFMPEG_PATH", "ffmpeg")
-
-
-def get_t5_tokenizer(checkpoint: str, cache: str = "tokenizers") -> spm.SentencePieceProcessor:
-    location = "mc4.250000.100extra" if checkpoint.startswith("mt5") else "cc_all.32000.100extra"
-
-    cache_path = Path(cache) / location
-    if not cache_path.exists():
-        BASE_URL = "https://storage.googleapis.com/t5-data/vocabs"
-        cache_path.mkdir(parents=True)
-
-        for filename in ("sentencepiece.model", "sentencepiece.vocab"):
-            resp = requests.get(f"{BASE_URL}/{location}/{filename}")
-            with open(cache_path / filename, "wb") as f:
-                f.write(resp.content)
-
-    return spm.SentencePieceProcessor(str(cache_path / "sentencepiece.model"))
 
 
 def get_librispeech_meta(data_dir: str, split: str) -> pd.DataFrame:
@@ -97,7 +80,7 @@ if __name__ == "__main__":
 
     meta = get_librispeech_meta(args.data_dir, args.split)
 
-    tokenizer = get_t5_tokenizer(args.t5_model)
+    tokenizer = T5Model.get_tokenizer(args.t5_model)
     all_text_ids = tokenizer.Encode(meta["text"].to_list(), add_eos=True)
 
     text_writer = SerializedDataWriter("text")
