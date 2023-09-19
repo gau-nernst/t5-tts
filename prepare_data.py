@@ -7,9 +7,8 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
-from modelling.encodec import EnCodec
-from modelling.t5 import T5Model
-from utils import load_audio
+from data.io import load_audio
+from modelling import EnCodec, T5Model
 
 
 def get_librispeech_meta(data_dir: str, split: str) -> pd.DataFrame:
