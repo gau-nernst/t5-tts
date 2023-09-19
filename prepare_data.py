@@ -7,6 +7,7 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
+from data import serialized_data
 from data.io import load_audio
 from modelling import EnCodec, T5Model
 
@@ -46,24 +47,6 @@ class AudioDataset(Dataset):
         return len(self.files)
 
 
-class SerializedDataWriter:
-    def __init__(self, name: str) -> None:
-        self.index = open(f"{name}.index", "wb")
-        self.data = open(f"{name}.data", "wb")
-        self.pos = np.array(0, dtype=np.int64)
-
-        self.index.write(self.pos.tobytes())
-
-    def write(self, item: np.ndarray) -> None:
-        self.data.write(item.tobytes())
-        self.pos += item.size
-        self.index.write(self.pos.tobytes())
-
-    def close(self) -> None:
-        self.index.close()
-        self.data.close()
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--t5_model", default="flan_t5")
@@ -81,13 +64,13 @@ if __name__ == "__main__":
     tokenizer = T5Model.get_tokenizer(args.t5_model)
     all_text_ids = tokenizer.Encode(meta["text"].to_list(), add_eos=True)
 
-    text_writer = SerializedDataWriter("text")
+    text_writer = serialized_data.Writer("text")
     for text_ids in all_text_ids:
         text_ids = np.array(text_ids, dtype=np.int16)  # vocab size is 32,000
         text_writer.write(text_ids)
     text_writer.close()
 
-    audio_writer = SerializedDataWriter("audio")
+    audio_writer = serialized_data.Writer("audio")
 
     # use PyTorch's DataLoader to load data in a separate process
     ds = AudioDataset(args.data_dir / args.split, meta["filename"].to_list())
