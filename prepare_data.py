@@ -3,6 +3,8 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import torch
+from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 from modelling.encodec import EnCodec
@@ -33,6 +35,18 @@ def get_librispeech_meta(data_dir: str, split: str) -> pd.DataFrame:
     return pd.DataFrame(dict(filename=filenames, text=texts, speaker_id=speaker_ids, chapter_id=chapter_ids))
 
 
+class AudioDataset(Dataset):
+    def __init__(self, data_dir: Path, files: list[str]) -> None:
+        self.data_dir = data_dir
+        self.files = files
+
+    def __getitem__(self, index) -> torch.Tensor:
+        return load_audio(self.data_dir / self.files[index], 16_000)
+
+    def __len__(self) -> int:
+        return len(self.files)
+
+
 class SerializedDataWriter:
     def __init__(self, name: str) -> None:
         self.index = open(f"{name}.index", "wb")
@@ -57,9 +71,11 @@ if __name__ == "__main__":
     parser.add_argument("--encodec_model", default="24khz")
     parser.add_argument("--data_dir", type=Path, required=True)
     parser.add_argument("--split", required=True)
+    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
 
     encodec = EnCodec.from_facebook(args.encodec_model, pretrained=True, decoder=False).eval()
+    encodec.to(args.device)
 
     meta = get_librispeech_meta(args.data_dir, args.split)
 
@@ -74,9 +90,12 @@ if __name__ == "__main__":
 
     audio_writer = SerializedDataWriter("audio")
 
-    for filename in tqdm(meta["filename"]):
-        audio = load_audio(args.data_dir / args.split / filename, 24_000)
-        audio_ids, scale = encodec.encode(audio.view(1, 1, -1))
+    # use PyTorch's DataLoader to load data in a separate process
+    ds = AudioDataset(args.data_dir / args.split, meta["filename"].to_list())
+    dloader = DataLoader(ds, num_workers=1)
+
+    for audio in tqdm(dloader):
+        audio_ids, scale = encodec.encode(audio.view(1, 1, -1).to(args.device))
         audio_ids = audio_ids.squeeze()  # (n_quantizers, length)
 
         audio_ids = audio_ids.cpu().numpy().astype(np.int16)  # codebook size is 1024
