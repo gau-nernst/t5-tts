@@ -1,19 +1,13 @@
 import argparse
-import os
-import shlex
-import subprocess
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import torch
 from tqdm import tqdm
 
 from modelling.encodec import EnCodec
 from modelling.t5 import T5Model
-
-
-FFMPEG_PATH = os.environ.get("FFMPEG_PATH", "ffmpeg")
+from utils import load_audio
 
 
 def get_librispeech_meta(data_dir: str, split: str) -> pd.DataFrame:
@@ -39,15 +33,6 @@ def get_librispeech_meta(data_dir: str, split: str) -> pd.DataFrame:
     return pd.DataFrame(dict(filename=filenames, text=texts, speaker_id=speaker_ids, chapter_id=chapter_ids))
 
 
-def load_audio(path: str, sample_rate: int) -> torch.Tensor:
-    cmd = f"{FFMPEG_PATH} -i {path} -ar {sample_rate} -ac 1 -f s32le -"
-    proc = subprocess.run(shlex.split(cmd), capture_output=True)
-
-    if proc.returncode:
-        raise RuntimeError(proc.stderr.decode())
-    return torch.frombuffer(proc.stdout, dtype=torch.int32) / 2_147_483_648
-
-
 class SerializedDataWriter:
     def __init__(self, name: str) -> None:
         self.index = open(f"{name}.index", "wb")
@@ -68,12 +53,10 @@ class SerializedDataWriter:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--t5_model", required=True)
-    parser.add_argument("--encodec_model", required=True)
-    parser.add_argument("--n_quantizers", type=int, default=4)
+    parser.add_argument("--t5_model", default="flan_t5")
+    parser.add_argument("--encodec_model", default="24khz")
     parser.add_argument("--data_dir", type=Path, required=True)
     parser.add_argument("--split", required=True)
-
     args = parser.parse_args()
 
     encodec = EnCodec.from_facebook(args.encodec_model, pretrained=True, decoder=False).eval()
@@ -93,10 +76,10 @@ if __name__ == "__main__":
 
     for filename in tqdm(meta["filename"]):
         audio = load_audio(args.data_dir / args.split / filename, 24_000)
-        audio_ids, scale = encodec.encode(audio.view(1, 1, -1), args.n_quantizers)
+        audio_ids, scale = encodec.encode(audio.view(1, 1, -1))
         audio_ids = audio_ids.squeeze()  # (n_quantizers, length)
 
-        audio_ids = audio_ids.cpu().to(torch.int16).numpy()  # codebook size is 1024
+        audio_ids = audio_ids.cpu().numpy().astype(np.int16)  # codebook size is 1024
         audio_writer.write(audio_ids)
 
     audio_writer.close()
